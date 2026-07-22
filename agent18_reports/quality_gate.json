@@ -1,0 +1,331 @@
+{
+  "version": "1.0.0-agent18",
+  "scores": {
+    "code_quality": 20.0,
+    "business_logic": 20.0,
+    "bug_score": 0.0,
+    "testing": 10.0,
+    "claude_review": 0.0
+  },
+  "total": 50.0,
+  "findings": [
+    {
+      "severity": "CRITICAL",
+      "category": "Claude Review",
+      "message": "Agent 10 đã upload video preview (privacyStatus=private, thumbnail_file=null) vào state.json nhưng không bị chặn bởi discover_jobs() vì key trong uploaded dùng đường dẫn tuyệt đối - nếu video bị xóa rồi tạo lại cùng tên thì state cũ vẫn ngăn upload lại, gây mất video vĩnh viễn",
+      "file": "agent10/main.py",
+      "location": "discover_jobs() + state uploaded key",
+      "remediation": "Key phải bao gồm content hash hoặc inode, không chỉ đường dẫn tuyệt đối"
+    },
+    {
+      "severity": "CRITICAL",
+      "category": "Claude Review",
+      "message": "agent10/main.py: sau khi archive_to_drive() xóa file video cục bộ (DELETE_LOCAL_AFTER_DRIVE=1), nếu write_receipt() hoặc save_json_atomic(STATE_FILE) thất bại thì video đã mất nhưng uploaded[key] chưa được ghi - lần chạy sau sẽ cố upload file không còn tồn tại, gây lỗi vô hạn",
+      "file": "agent10/main.py",
+      "location": "khối DRIVE_ENABLED sau upload",
+      "remediation": "Phải ghi state trước khi xóa file, hoặc dùng 2-phase commit"
+    },
+    {
+      "severity": "CRITICAL",
+      "category": "Claude Review",
+      "message": "agent2/database.py: hàm mark_verified_guarded() dùng BEGIN IMMEDIATE nhưng connect() không có isolation_level=None - SQLite Python mặc định tự quản lý transaction, gọi conn.execute('BEGIN IMMEDIATE') trong context manager 'with connect() as conn' có thể gây double-commit hoặc implicit rollback, phá vỡ tính nguyên tử của guard",
+      "file": "agent2/database.py",
+      "location": "mark_verified_guarded, connect()",
+      "remediation": "Dùng conn = sqlite3.connect(..., isolation_level=None) rồi quản lý transaction thủ công, hoặc dùng conn.isolation_level"
+    },
+    {
+      "severity": "CRITICAL",
+      "category": "Claude Review",
+      "message": "agent1/database.py: connect() không đặt busy_timeout - trong môi trường WAL nhiều agent cùng ghi (agent1, agent2, agent18 pipeline_core) sẽ nhận OperationalError 'database is locked' ngay lập tức thay vì chờ",
+      "file": "agent1/database.py",
+      "location": "connect()",
+      "remediation": "Thêm conn.execute('PRAGMA busy_timeout=30000') sau khi kết nối"
+    },
+    {
+      "severity": "HIGH",
+      "category": "Claude Review",
+      "message": "agent10/uploader.py: retry_call() với do_upload() - nếu upload bị ngắt giữa chừng và retry, MediaFileUpload mới được tạo từ đầu thay vì resume từ offset đã upload - gây tốn băng thông và có thể tạo video trùng trên YouTube nếu YouTube đã nhận xong nhưng response bị mất",
+      "file": "agent10/uploader.py",
+      "location": "do_upload() trong retry_call",
+      "remediation": "Lưu request object giữa các lần retry để resume chunked upload"
+    },
+    {
+      "severity": "HIGH",
+      "category": "Claude Review",
+      "message": "agent18/review_engine/bundle.py: MAX_TOTAL_CHARS=220000 nhưng toàn bộ codebase được submit trong prompt - nếu bundle bị cắt giữa chừng ([ĐÃ_CẮT_BỚT]) thì Claude review dựa trên code không đầy đủ, kết quả review không đáng tin cậy và có thể PASS sai",
+      "file": "agent18/review_engine/bundle.py",
+      "location": "MAX_TOTAL_CHARS, MAX_FILE_CHARS",
+      "remediation": "Tăng giới hạn hoặc ưu tiên file quan trọng, log rõ khi bundle bị cắt"
+    },
+    {
+      "severity": "HIGH",
+      "category": "Claude Review",
+      "message": "agent2/research.py: _resolve_google_news() gọi requests.get() không có timeout riêng - dùng REQUEST_TIMEOUT=45s nhưng hàm này được gọi trong vòng lặp cho mỗi entry RSS, có thể block toàn bộ agent2 hàng chục phút nếu Google News redirect chậm",
+      "file": "agent2/research.py",
+      "location": "_resolve_google_news()",
+      "remediation": "Đặt timeout ngắn hơn (5-10s) cho resolve redirect"
+    },
+    {
+      "severity": "HIGH",
+      "category": "Claude Review",
+      "message": "agent18/pipeline_core/quality_gate.py: QualityScores có field 'claude_review' nhưng milestone.py dùng field 'ai_review' - GateReport từ milestone_90_report() sẽ raise AttributeError hoặc tính sai tổng điểm",
+      "file": "agent18/pipeline_core/milestone.py",
+      "location": "QualityScores(ai_review=6.0)",
+      "remediation": "Đổi ai_review thành claude_review cho nhất quán với dataclass"
+    },
+    {
+      "severity": "HIGH",
+      "category": "Claude Review",
+      "message": "agent10/main.py: fcntl.flock() được gọi sau khi LOCK_FILE.open('r+') nhưng nếu tiến trình bị kill sau flock và trước khi hoàn thành, lock file không được giải phóng tự động trên Linux vì flock gắn với file descriptor - tuy nhiên vấn đề thực sự là LOCK_FILE.touch() ở ngoài context manager, nếu thư mục chưa tồn tại sẽ raise FileNotFoundError trước khi mkdir",
+      "file": "agent10/main.py",
+      "location": "LOCK_FILE.touch(exist_ok=True)",
+      "remediation": "Đảm bảo LOCK_FILE.parent.mkdir() được gọi trước LOCK_FILE.touch()"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "Claude Review",
+      "message": "agent1/database.py: insert_case() gọi conn.commit() thủ công bên trong 'with connect() as conn' - context manager của sqlite3 đã tự commit khi thoát không có exception, gọi commit() thêm là dư thừa và có thể gây confusion",
+      "file": "agent1/database.py",
+      "location": "insert_case()",
+      "remediation": "Bỏ conn.commit() thủ công"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "Claude Review",
+      "message": "agent2/main.py: toàn bộ logic được viết trên một dòng dài (minified) gây khó đọc, khó debug và khó audit bảo mật - vi phạm tiêu chuẩn code quality",
+      "file": "agent2/main.py",
+      "location": "run(), process_case()",
+      "remediation": "Format lại code theo PEP 8"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "Claude Review",
+      "message": "agent10/preflight.py: validate_metadata() tính tag size bằng len(str(x).encode('utf-8')) + 1 nhưng YouTube API giới hạn 500 ký tự tổng (không phải byte UTF-8) - logic kiểm tra sai với tag chứa ký tự đa byte",
+      "file": "agent10/preflight.py",
+      "location": "validate_metadata()",
+      "remediation": "Dùng len(str(x)) thay vì len(str(x).encode('utf-8'))"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "Claude Review",
+      "message": "agent18/agent18_runner.py: github_sync được import động và lỗi bị bắt nhưng kết quả review vẫn được ghi là thành công - không có cơ chế retry cho GitHub sync, báo cáo có thể không được lưu lên remote",
+      "file": "agent18/agent18_runner.py",
+      "location": "github_sync block",
+      "remediation": "Log rõ ràng và có retry hoặc alert khi sync thất bại"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "Claude Review",
+      "message": "agent2/research.py: search cache lưu toàn bộ kết quả search vào một file JSON duy nhất (agent2_v11_cache.json) không có giới hạn kích thước - sau nhiều tháng chạy file có thể đạt hàng trăm MB gây chậm I/O",
+      "file": "agent2/research.py",
+      "location": "_load_cache(), _save_cache()",
+      "remediation": "Giới hạn số entry cache hoặc dùng SQLite cho cache"
+    },
+    {
+      "severity": "MEDIUM",
+      "category": "Claude Review",
+      "message": "agent18/pipeline_core/database.py: migrate() dùng BEGIN IMMEDIATE nhưng executescript() tự động commit transaction hiện tại trước khi chạy - các ALTER TABLE và CREATE TABLE không nằm trong cùng một transaction, có thể để lại schema không nhất quán nếu bị ngắt giữa chừng",
+      "file": "agent18/pipeline_core/database.py",
+      "location": "migrate(), executescript()",
+      "remediation": "Tách executescript thành các execute() riêng lẻ trong cùng transaction"
+    },
+    {
+      "severity": "LOW",
+      "category": "Claude Review",
+      "message": "agent1/gemini_scorer.py: model mặc định là 'gemini-3.5-flash' nhưng README_V3.txt đề cập 'gemini-3.1-flash-lite' - không nhất quán giữa tài liệu và code",
+      "file": "agent1/config.py",
+      "location": "GEMINI_MODEL default",
+      "remediation": "Đồng bộ tên model giữa README và config"
+    },
+    {
+      "severity": "LOW",
+      "category": "Claude Review",
+      "message": "agent10/state.json: có entry upload preview video với privacyStatus=private và thumbnail_file=null - đây là dữ liệu production thực tế lộ trong source code repository",
+      "file": "agent10/state.json",
+      "location": "toàn bộ file",
+      "remediation": "Không commit state file production vào repository"
+    },
+    {
+      "severity": "LOW",
+      "category": "Claude Review",
+      "message": "agent18/review_engine/claude.py: temperature=0 được hardcode - không thể cấu hình qua env var",
+      "file": "agent18/review_engine/claude.py",
+      "location": "client.messages.create(temperature=0)",
+      "remediation": "Cho phép cấu hình qua ANTHROPIC_TEMPERATURE env var"
+    },
+    {
+      "severity": "LOW",
+      "category": "Claude Review",
+      "message": "Không có test evidence trên VPS - toàn bộ hệ thống 18 agent không có automated test suite được chạy và ghi log, không thể xác minh tính đúng đắn của các thay đổi V3",
+      "file": "(toàn hệ thống)",
+      "location": "CI/CD",
+      "remediation": "Thêm pytest với coverage tối thiểu cho database migrations, state machine transitions, và preflight validation"
+    }
+  ],
+  "severity_counts": {
+    "CRITICAL": 4,
+    "HIGH": 5,
+    "MEDIUM": 6,
+    "LOW": 4
+  },
+  "required_tests": {
+    "source_bundle": true,
+    "security_redaction": true,
+    "claude_api": true
+  },
+  "claude_decision": "FAIL",
+  "regression_delta": 0.0,
+  "cost_delta_percent": 0.0,
+  "runtime_delta_percent": 0.0,
+  "release_allowed": false,
+  "milestone": 50,
+  "claude": {
+    "decision": "FAIL",
+    "score": 52.0,
+    "critical_issues": [
+      {
+        "issue": "Agent 10 đã upload video preview (privacyStatus=private, thumbnail_file=null) vào state.json nhưng không bị chặn bởi discover_jobs() vì key trong uploaded dùng đường dẫn tuyệt đối - nếu video bị xóa rồi tạo lại cùng tên thì state cũ vẫn ngăn upload lại, gây mất video vĩnh viễn",
+        "file": "agent10/main.py",
+        "line_or_area": "discover_jobs() + state uploaded key",
+        "required_fix": "Key phải bao gồm content hash hoặc inode, không chỉ đường dẫn tuyệt đối"
+      },
+      {
+        "issue": "agent10/main.py: sau khi archive_to_drive() xóa file video cục bộ (DELETE_LOCAL_AFTER_DRIVE=1), nếu write_receipt() hoặc save_json_atomic(STATE_FILE) thất bại thì video đã mất nhưng uploaded[key] chưa được ghi - lần chạy sau sẽ cố upload file không còn tồn tại, gây lỗi vô hạn",
+        "file": "agent10/main.py",
+        "line_or_area": "khối DRIVE_ENABLED sau upload",
+        "required_fix": "Phải ghi state trước khi xóa file, hoặc dùng 2-phase commit"
+      },
+      {
+        "issue": "agent2/database.py: hàm mark_verified_guarded() dùng BEGIN IMMEDIATE nhưng connect() không có isolation_level=None - SQLite Python mặc định tự quản lý transaction, gọi conn.execute('BEGIN IMMEDIATE') trong context manager 'with connect() as conn' có thể gây double-commit hoặc implicit rollback, phá vỡ tính nguyên tử của guard",
+        "file": "agent2/database.py",
+        "line_or_area": "mark_verified_guarded, connect()",
+        "required_fix": "Dùng conn = sqlite3.connect(..., isolation_level=None) rồi quản lý transaction thủ công, hoặc dùng conn.isolation_level"
+      },
+      {
+        "issue": "agent1/database.py: connect() không đặt busy_timeout - trong môi trường WAL nhiều agent cùng ghi (agent1, agent2, agent18 pipeline_core) sẽ nhận OperationalError 'database is locked' ngay lập tức thay vì chờ",
+        "file": "agent1/database.py",
+        "line_or_area": "connect()",
+        "required_fix": "Thêm conn.execute('PRAGMA busy_timeout=30000') sau khi kết nối"
+      }
+    ],
+    "high_issues": [
+      {
+        "issue": "agent10/uploader.py: retry_call() với do_upload() - nếu upload bị ngắt giữa chừng và retry, MediaFileUpload mới được tạo từ đầu thay vì resume từ offset đã upload - gây tốn băng thông và có thể tạo video trùng trên YouTube nếu YouTube đã nhận xong nhưng response bị mất",
+        "file": "agent10/uploader.py",
+        "line_or_area": "do_upload() trong retry_call",
+        "required_fix": "Lưu request object giữa các lần retry để resume chunked upload"
+      },
+      {
+        "issue": "agent18/review_engine/bundle.py: MAX_TOTAL_CHARS=220000 nhưng toàn bộ codebase được submit trong prompt - nếu bundle bị cắt giữa chừng ([ĐÃ_CẮT_BỚT]) thì Claude review dựa trên code không đầy đủ, kết quả review không đáng tin cậy và có thể PASS sai",
+        "file": "agent18/review_engine/bundle.py",
+        "line_or_area": "MAX_TOTAL_CHARS, MAX_FILE_CHARS",
+        "required_fix": "Tăng giới hạn hoặc ưu tiên file quan trọng, log rõ khi bundle bị cắt"
+      },
+      {
+        "issue": "agent2/research.py: _resolve_google_news() gọi requests.get() không có timeout riêng - dùng REQUEST_TIMEOUT=45s nhưng hàm này được gọi trong vòng lặp cho mỗi entry RSS, có thể block toàn bộ agent2 hàng chục phút nếu Google News redirect chậm",
+        "file": "agent2/research.py",
+        "line_or_area": "_resolve_google_news()",
+        "required_fix": "Đặt timeout ngắn hơn (5-10s) cho resolve redirect"
+      },
+      {
+        "issue": "agent18/pipeline_core/quality_gate.py: QualityScores có field 'claude_review' nhưng milestone.py dùng field 'ai_review' - GateReport từ milestone_90_report() sẽ raise AttributeError hoặc tính sai tổng điểm",
+        "file": "agent18/pipeline_core/milestone.py",
+        "line_or_area": "QualityScores(ai_review=6.0)",
+        "required_fix": "Đổi ai_review thành claude_review cho nhất quán với dataclass"
+      },
+      {
+        "issue": "agent10/main.py: fcntl.flock() được gọi sau khi LOCK_FILE.open('r+') nhưng nếu tiến trình bị kill sau flock và trước khi hoàn thành, lock file không được giải phóng tự động trên Linux vì flock gắn với file descriptor - tuy nhiên vấn đề thực sự là LOCK_FILE.touch() ở ngoài context manager, nếu thư mục chưa tồn tại sẽ raise FileNotFoundError trước khi mkdir",
+        "file": "agent10/main.py",
+        "line_or_area": "LOCK_FILE.touch(exist_ok=True)",
+        "required_fix": "Đảm bảo LOCK_FILE.parent.mkdir() được gọi trước LOCK_FILE.touch()"
+      }
+    ],
+    "medium_issues": [
+      {
+        "issue": "agent1/database.py: insert_case() gọi conn.commit() thủ công bên trong 'with connect() as conn' - context manager của sqlite3 đã tự commit khi thoát không có exception, gọi commit() thêm là dư thừa và có thể gây confusion",
+        "file": "agent1/database.py",
+        "line_or_area": "insert_case()",
+        "required_fix": "Bỏ conn.commit() thủ công"
+      },
+      {
+        "issue": "agent2/main.py: toàn bộ logic được viết trên một dòng dài (minified) gây khó đọc, khó debug và khó audit bảo mật - vi phạm tiêu chuẩn code quality",
+        "file": "agent2/main.py",
+        "line_or_area": "run(), process_case()",
+        "required_fix": "Format lại code theo PEP 8"
+      },
+      {
+        "issue": "agent10/preflight.py: validate_metadata() tính tag size bằng len(str(x).encode('utf-8')) + 1 nhưng YouTube API giới hạn 500 ký tự tổng (không phải byte UTF-8) - logic kiểm tra sai với tag chứa ký tự đa byte",
+        "file": "agent10/preflight.py",
+        "line_or_area": "validate_metadata()",
+        "required_fix": "Dùng len(str(x)) thay vì len(str(x).encode('utf-8'))"
+      },
+      {
+        "issue": "agent18/agent18_runner.py: github_sync được import động và lỗi bị bắt nhưng kết quả review vẫn được ghi là thành công - không có cơ chế retry cho GitHub sync, báo cáo có thể không được lưu lên remote",
+        "file": "agent18/agent18_runner.py",
+        "line_or_area": "github_sync block",
+        "required_fix": "Log rõ ràng và có retry hoặc alert khi sync thất bại"
+      },
+      {
+        "issue": "agent2/research.py: search cache lưu toàn bộ kết quả search vào một file JSON duy nhất (agent2_v11_cache.json) không có giới hạn kích thước - sau nhiều tháng chạy file có thể đạt hàng trăm MB gây chậm I/O",
+        "file": "agent2/research.py",
+        "line_or_area": "_load_cache(), _save_cache()",
+        "required_fix": "Giới hạn số entry cache hoặc dùng SQLite cho cache"
+      },
+      {
+        "issue": "agent18/pipeline_core/database.py: migrate() dùng BEGIN IMMEDIATE nhưng executescript() tự động commit transaction hiện tại trước khi chạy - các ALTER TABLE và CREATE TABLE không nằm trong cùng một transaction, có thể để lại schema không nhất quán nếu bị ngắt giữa chừng",
+        "file": "agent18/pipeline_core/database.py",
+        "line_or_area": "migrate(), executescript()",
+        "required_fix": "Tách executescript thành các execute() riêng lẻ trong cùng transaction"
+      }
+    ],
+    "low_issues": [
+      {
+        "issue": "agent1/gemini_scorer.py: model mặc định là 'gemini-3.5-flash' nhưng README_V3.txt đề cập 'gemini-3.1-flash-lite' - không nhất quán giữa tài liệu và code",
+        "file": "agent1/config.py",
+        "line_or_area": "GEMINI_MODEL default",
+        "required_fix": "Đồng bộ tên model giữa README và config"
+      },
+      {
+        "issue": "agent10/state.json: có entry upload preview video với privacyStatus=private và thumbnail_file=null - đây là dữ liệu production thực tế lộ trong source code repository",
+        "file": "agent10/state.json",
+        "line_or_area": "toàn bộ file",
+        "required_fix": "Không commit state file production vào repository"
+      },
+      {
+        "issue": "agent18/review_engine/claude.py: temperature=0 được hardcode - không thể cấu hình qua env var",
+        "file": "agent18/review_engine/claude.py",
+        "line_or_area": "client.messages.create(temperature=0)",
+        "required_fix": "Cho phép cấu hình qua ANTHROPIC_TEMPERATURE env var"
+      },
+      {
+        "issue": "Không có test evidence trên VPS - toàn bộ hệ thống 18 agent không có automated test suite được chạy và ghi log, không thể xác minh tính đúng đắn của các thay đổi V3",
+        "file": "(toàn hệ thống)",
+        "line_or_area": "CI/CD",
+        "required_fix": "Thêm pytest với coverage tối thiểu cho database migrations, state machine transitions, và preflight validation"
+      }
+    ],
+    "strengths": [
+      "agent10/state_store.py: save_json_atomic() dùng fsync + os.replace() đúng chuẩn, an toàn khi VPS mất điện",
+      "agent10/main.py: checkpoint youtube_done ngay sau upload thành công trước khi Drive - đúng thiết kế 2-phase",
+      "agent18/pipeline_core/database.py: schema migration có version tracking (PRAGMA user_version), foreign key check, và idempotent CREATE IF NOT EXISTS",
+      "agent2/database.py: repair_orphan_verified() phát hiện và sửa case VERIFIED thiếu nguồn - logic phòng thủ tốt",
+      "agent18/pipeline_core/states.py: state machine đầy đủ với ALLOWED transitions, terminal states rõ ràng",
+      "agent18/review_engine/bundle.py: redact secrets trước khi gửi Claude - bảo mật tốt",
+      "agent10/main.py: fcntl.flock() ngăn chạy song song, daily_count() giới hạn upload mỗi ngày",
+      "agent2/database.py: mark_verified_guarded() kiểm tra lại nguồn trong DB trước khi VERIFIED - guard pattern đúng",
+      "agent18/pipeline_core/errors.py: phân loại lỗi retryable/non-retryable với backoff schedule rõ ràng",
+      "agent1/filtering.py: rapidfuzz token_set_ratio chống trùng lặp tiêu đề hiệu quả"
+    ],
+    "tests_reviewed": [
+      "Không có test evidence trên VPS - đây là hạn chế nghiêm trọng",
+      "agent18/pipeline_core/adapters.py: DeterministicAdapter có thể dùng cho unit test nhưng không có test file nào được cung cấp",
+      "Không có pytest, unittest hoặc bất kỳ test runner nào được tìm thấy trong codebase"
+    ],
+    "release_allowed": false,
+    "reviewer": "Claude",
+    "candidate_sha256": "529c57ad547ed2acb5d2397807dddef8376eccb8a5aa4c786701f4ddc89336b3",
+    "model": "claude-sonnet-4-6"
+  },
+  "claude_pass": false,
+  "stable_99_allowed": false
+}

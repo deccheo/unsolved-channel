@@ -1,0 +1,14 @@
+{
+  "reviewed_at": "2026-07-22T18:08:01.886005+00:00",
+  "candidate_root": "/opt/unsolved-channel",
+  "claude_score": 52.0,
+  "claude_decision": "FAIL",
+  "critical": 4,
+  "high": 5,
+  "medium": 6,
+  "low": 4,
+  "quality_total": 50.0,
+  "stable_99_allowed": false,
+  "candidate_sha256": "529c57ad547ed2acb5d2397807dddef8376eccb8a5aa4c786701f4ddc89336b3",
+  "model": "claude-sonnet-4-6"
+}
