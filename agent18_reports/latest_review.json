@@ -1,6 +1,6 @@
 {
   "schema_version": "agent18.public-review.v1",
-  "published_at": "2026-07-22T18:19:14.706689+00:00",
+  "published_at": "2026-07-22T19:28:26.625731+00:00",
   "repository": "deccheo/unsolved-channel",
   "branch": "main",
   "claude_score": 52.0,
@@ -9,147 +9,156 @@
   "critical": 4,
   "high": 5,
   "medium": 6,
-  "low": 4,
-  "candidate_sha256": "529c57ad547ed2acb5d2397807dddef8376eccb8a5aa4c786701f4ddc89336b3",
+  "low": 5,
+  "candidate_sha256": "ace684adff6e43b1a61154ecdf31bb9b5af9682e56c8bed5d0578caae343be85",
   "model": "claude-sonnet-4-6",
   "stable_99_allowed": false,
   "critical_issues": [
     {
-      "issue": "Agent 10 đã upload video preview (privacyStatus=private, thumbnail_file=null) vào state.json nhưng không bị chặn bởi discover_jobs() vì key trong uploaded dùng đường dẫn tuyệt đối - nếu video bị xóa rồi tạo lại cùng tên thì state cũ vẫn ngăn upload lại, gây mất video vĩnh viễn",
-      "file": "agent10/main.py",
-      "line_or_area": "discover_jobs() + state uploaded key",
-      "required_fix": "Key phải bao gồm content hash hoặc inode, không chỉ đường dẫn tuyệt đối"
+      "issue": "Agent 10 đã upload video preview (privacyStatus=private, không có thumbnail) vào state.json nhưng không bị chặn bởi discover_jobs vì key grouping chỉ dùng stem.split('-',1)[0] = '0013' - cả preview lẫn full đều có cùng key '0013', nên video_rank quyết định. Tuy nhiên state.json hiện tại có cả hai entry trong 'uploaded', nghĩa là preview đã được upload thành công trước khi logic TURBO được áp dụng. Rủi ro: nếu state bị xóa hoặc reset, preview sẽ bị upload lại lên YouTube lần thứ hai vì không có cơ chế chặn theo video_id đã tồn tại trên YouTube.",
+      "file": "agent10/main.py + agent10/state.json",
+      "line_or_area": "discover_jobs(), video_rank()",
+      "required_fix": "Thêm kiểm tra video_id đã tồn tại trên YouTube API trước khi upload; hoặc lưu danh sách video_id đã upload vào state riêng biệt không phụ thuộc vào đường dẫn file local."
     },
     {
-      "issue": "agent10/main.py: sau khi archive_to_drive() xóa file video cục bộ (DELETE_LOCAL_AFTER_DRIVE=1), nếu write_receipt() hoặc save_json_atomic(STATE_FILE) thất bại thì video đã mất nhưng uploaded[key] chưa được ghi - lần chạy sau sẽ cố upload file không còn tồn tại, gây lỗi vô hạn",
+      "issue": "Race condition nghiêm trọng trong increment_daily(): hàm đọc DAILY_STATE_FILE, tăng counter rồi ghi lại - không có lock. Nếu hai tiến trình chạy đồng thời (dù có fcntl.flock trên LOCK_FILE), hàm daily_count() được gọi nhiều lần trong vòng lặp mà không giữ lock liên tục, dẫn đến có thể vượt DAILY_LIMIT.",
       "file": "agent10/main.py",
-      "line_or_area": "khối DRIVE_ENABLED sau upload",
-      "required_fix": "Phải ghi state trước khi xóa file, hoặc dùng 2-phase commit"
+      "line_or_area": "increment_daily(), daily_count()",
+      "required_fix": "Đọc và ghi DAILY_STATE_FILE phải nằm trong cùng một transaction được bảo vệ bởi lock đang giữ; không gọi daily_count() lại sau khi đã increment."
     },
     {
-      "issue": "agent2/database.py: hàm mark_verified_guarded() dùng BEGIN IMMEDIATE nhưng connect() không có isolation_level=None - SQLite Python mặc định tự quản lý transaction, gọi conn.execute('BEGIN IMMEDIATE') trong context manager 'with connect() as conn' có thể gây double-commit hoặc implicit rollback, phá vỡ tính nguyên tử của guard",
+      "issue": "agent10/drive_archive.py backup version ghi receipt_file trực tiếp vào video.parent (không dùng tempfile), tạo file .{stem}.upload-receipt.json trong thư mục output/videos - file này không được dọn dẹp nếu rclone thất bại ở file đầu tiên (video) vì finally chỉ unlink sau khi vòng lặp kết thúc. Nếu video.parent không writable thì crash toàn bộ archive step sau khi YouTube đã upload thành công, gây mất receipt.",
+      "file": "agent10_backup/drive_archive.py",
+      "line_or_error": "receipt_file = video.parent / f'.{video.stem}.upload-receipt.json'",
+      "required_fix": "Dùng tempfile.NamedTemporaryFile như phiên bản TURBO đã sửa; đảm bảo backup không được deploy."
+    },
+    {
+      "issue": "agent2/database.py hàm mark_verified_guarded() dùng BEGIN IMMEDIATE nhưng sau đó gọi count_usable_sources() rồi UPDATE - không có rollback tường minh nếu RuntimeError được raise. Trong SQLite Python context manager, exception sẽ rollback, nhưng hàm không dùng 'with connect() as conn' đúng cách cho transaction - nó dùng connect() trả về connection không autocommit khi dùng BEGIN IMMEDIATE thủ công. Nếu exception xảy ra sau BEGIN IMMEDIATE nhưng trước commit, connection bị đóng mà không rollback tường minh có thể gây lock timeout cho các writer khác.",
       "file": "agent2/database.py",
-      "line_or_area": "mark_verified_guarded, connect()",
-      "required_fix": "Dùng conn = sqlite3.connect(..., isolation_level=None) rồi quản lý transaction thủ công, hoặc dùng conn.isolation_level"
-    },
-    {
-      "issue": "agent1/database.py: connect() không đặt busy_timeout - trong môi trường WAL nhiều agent cùng ghi (agent1, agent2, agent18 pipeline_core) sẽ nhận OperationalError 'database is locked' ngay lập tức thay vì chờ",
-      "file": "agent1/database.py",
-      "line_or_area": "connect()",
-      "required_fix": "Thêm conn.execute('PRAGMA busy_timeout=30000') sau khi kết nối"
+      "line_or_area": "mark_verified_guarded()",
+      "required_fix": "Dùng try/except/finally với conn.rollback() tường minh, hoặc dùng context manager đúng cách với WAL mode."
     }
   ],
   "high_issues": [
     {
-      "issue": "agent10/uploader.py: retry_call() với do_upload() - nếu upload bị ngắt giữa chừng và retry, MediaFileUpload mới được tạo từ đầu thay vì resume từ offset đã upload - gây tốn băng thông và có thể tạo video trùng trên YouTube nếu YouTube đã nhận xong nhưng response bị mất",
+      "issue": "agent1/database.py hàm connect() không set busy_timeout, chỉ dùng WAL mode. Với nhiều agent cùng truy cập cases.db (agent1, agent2, agent10 đều dùng cùng DB), nếu write lock bị giữ lâu sẽ raise OperationalError 'database is locked' ngay lập tức thay vì chờ. Agent2 có busy_timeout=30000 nhưng agent1 thì không.",
+      "file": "agent1/database.py",
+      "line_or_area": "connect()",
+      "required_fix": "Thêm conn.execute('PRAGMA busy_timeout=30000') vào hàm connect() của agent1."
+    },
+    {
+      "issue": "agent2/database.py hàm schedule_retry() set production_status='FAILED' khi retry_count >= MAX_RETRIES, nhưng hàm pending_cases() lọc theo production_status='NEW'. Sau khi FAILED, case không thể được xử lý lại trừ khi có can thiệp thủ công. Tuy nhiên không có cơ chế alert hoặc escalation tự động cho FAILED cases - chúng im lặng biến mất khỏi queue.",
+      "file": "agent2/database.py + agent2/main.py",
+      "line_or_area": "schedule_retry(), pending_cases()",
+      "required_fix": "Thêm Telegram notification khi case chuyển sang FAILED; thêm query để report số lượng FAILED cases mỗi lần chạy."
+    },
+    {
+      "issue": "agent10/uploader.py hàm do_upload() trong retry_call: khi upload thất bại giữa chừng (resumable upload), MediaFileUpload object bị tạo lại từ đầu trong mỗi lần retry vì do_upload() là closure tạo media mới. Điều này có nghĩa là resumable upload không thực sự resume - mỗi retry bắt đầu upload lại từ đầu, lãng phí bandwidth và có thể tạo nhiều video draft trên YouTube.",
       "file": "agent10/uploader.py",
-      "line_or_area": "do_upload() trong retry_call",
-      "required_fix": "Lưu request object giữa các lần retry để resume chunked upload"
+      "line_or_area": "do_upload() trong retry_call()",
+      "required_fix": "Tách MediaFileUpload và request.insert() ra ngoài vòng retry; chỉ retry next_chunk() loop; hoặc implement proper resumable upload với upload_id."
     },
     {
-      "issue": "agent18/review_engine/bundle.py: MAX_TOTAL_CHARS=220000 nhưng toàn bộ codebase được submit trong prompt - nếu bundle bị cắt giữa chừng ([ĐÃ_CẮT_BỚT]) thì Claude review dựa trên code không đầy đủ, kết quả review không đáng tin cậy và có thể PASS sai",
+      "issue": "agent18/review_engine/bundle.py giới hạn MAX_TOTAL_CHARS=220000 và MAX_FILE_CHARS=50000 nhưng không có cơ chế ưu tiên file quan trọng khi bị cắt. Nếu bundle bị cắt giữa chừng, Claude sẽ review code không đầy đủ và có thể đưa ra đánh giá sai. Không có warning nào được log khi bundle bị truncate.",
       "file": "agent18/review_engine/bundle.py",
-      "line_or_area": "MAX_TOTAL_CHARS, MAX_FILE_CHARS",
-      "required_fix": "Tăng giới hạn hoặc ưu tiên file quan trọng, log rõ khi bundle bị cắt"
+      "line_or_area": "build_bundle()",
+      "required_fix": "Log warning rõ ràng khi bundle bị truncate; ưu tiên file core (contracts, database, main) trước; thêm trường 'truncated' vào metadata."
     },
     {
-      "issue": "agent2/research.py: _resolve_google_news() gọi requests.get() không có timeout riêng - dùng REQUEST_TIMEOUT=45s nhưng hàm này được gọi trong vòng lặp cho mỗi entry RSS, có thể block toàn bộ agent2 hàng chục phút nếu Google News redirect chậm",
-      "file": "agent2/research.py",
-      "line_or_area": "_resolve_google_news()",
-      "required_fix": "Đặt timeout ngắn hơn (5-10s) cho resolve redirect"
-    },
-    {
-      "issue": "agent18/pipeline_core/quality_gate.py: QualityScores có field 'claude_review' nhưng milestone.py dùng field 'ai_review' - GateReport từ milestone_90_report() sẽ raise AttributeError hoặc tính sai tổng điểm",
-      "file": "agent18/pipeline_core/milestone.py",
-      "line_or_area": "QualityScores(ai_review=6.0)",
-      "required_fix": "Đổi ai_review thành claude_review cho nhất quán với dataclass"
-    },
-    {
-      "issue": "agent10/main.py: fcntl.flock() được gọi sau khi LOCK_FILE.open('r+') nhưng nếu tiến trình bị kill sau flock và trước khi hoàn thành, lock file không được giải phóng tự động trên Linux vì flock gắn với file descriptor - tuy nhiên vấn đề thực sự là LOCK_FILE.touch() ở ngoài context manager, nếu thư mục chưa tồn tại sẽ raise FileNotFoundError trước khi mkdir",
-      "file": "agent10/main.py",
-      "line_or_area": "LOCK_FILE.touch(exist_ok=True)",
-      "required_fix": "Đảm bảo LOCK_FILE.parent.mkdir() được gọi trước LOCK_FILE.touch()"
+      "issue": "agent10/preflight.py hàm validate() gọi ffprobe ngay cả khi video không tồn tại (chỉ skip nếu not video.exists()), nhưng logic kiểm tra 'if video.exists()' sau khi đã có thể thêm error 'video không tồn tại' - ffprobe sẽ không được gọi. Tuy nhiên thumbnail validation vẫn chạy kể cả khi video không tồn tại, gây ra kết quả preflight không nhất quán: video lỗi nhưng thumbnail OK.",
+      "file": "agent10/preflight.py",
+      "line_or_area": "validate()",
+      "required_fix": "Early return sau khi phát hiện video không tồn tại; không validate thumbnail nếu video không hợp lệ."
     }
   ],
   "medium_issues": [
     {
-      "issue": "agent1/database.py: insert_case() gọi conn.commit() thủ công bên trong 'with connect() as conn' - context manager của sqlite3 đã tự commit khi thoát không có exception, gọi commit() thêm là dư thừa và có thể gây confusion",
-      "file": "agent1/database.py",
-      "line_or_area": "insert_case()",
-      "required_fix": "Bỏ conn.commit() thủ công"
+      "issue": "agent1/filtering.py dùng fuzz.token_set_ratio với threshold 90 để dedup, nhưng vòng lặp O(n*m) với known titles có thể lên đến 2000 entries và accepted_titles tăng dần. Với MAX_CASES_PER_RUN=25 và 8 queries x 10 articles = 80 items, performance không phải vấn đề ngay, nhưng khi DB lớn hơn sẽ chậm đáng kể.",
+      "file": "agent1/filtering.py",
+      "line_or_area": "filter_items()",
+      "required_fix": "Dùng BK-tree hoặc index-based fuzzy matching; hoặc giới hạn known titles thông minh hơn."
     },
     {
-      "issue": "agent2/main.py: toàn bộ logic được viết trên một dòng dài (minified) gây khó đọc, khó debug và khó audit bảo mật - vi phạm tiêu chuẩn code quality",
+      "issue": "agent2/main.py toàn bộ logic được viết trên một dòng dài (minified), gây khó đọc, khó debug và khó maintain. Đây là anti-pattern nghiêm trọng cho production code.",
       "file": "agent2/main.py",
       "line_or_area": "run(), process_case()",
-      "required_fix": "Format lại code theo PEP 8"
+      "required_fix": "Format lại code theo PEP 8 chuẩn."
     },
     {
-      "issue": "agent10/preflight.py: validate_metadata() tính tag size bằng len(str(x).encode('utf-8')) + 1 nhưng YouTube API giới hạn 500 ký tự tổng (không phải byte UTF-8) - logic kiểm tra sai với tag chứa ký tự đa byte",
-      "file": "agent10/preflight.py",
-      "line_or_area": "validate_metadata()",
-      "required_fix": "Dùng len(str(x)) thay vì len(str(x).encode('utf-8'))"
+      "issue": "agent10/main.py hàm find_metadata() có logic tìm kiếm phức tạp với 3 candidates list nhưng không log khi không tìm thấy metadata - video bị skip im lặng trong discover_jobs(). Operator không biết tại sao video không được upload.",
+      "file": "agent10/main.py",
+      "line_or_area": "find_metadata(), discover_jobs()",
+      "required_fix": "Log warning khi video không có metadata; thêm counter 'no_metadata' vào stats."
     },
     {
-      "issue": "agent18/agent18_runner.py: github_sync được import động và lỗi bị bắt nhưng kết quả review vẫn được ghi là thành công - không có cơ chế retry cho GitHub sync, báo cáo có thể không được lưu lên remote",
+      "issue": "agent18/pipeline_core/quality_gate.py class QualityScores có field 'claude_review' nhưng agent18/pipeline_core/milestone.py dùng field 'ai_review' - không tồn tại trong dataclass, sẽ gây TypeError khi milestone_90_report() được gọi.",
+      "file": "agent18/pipeline_core/milestone.py",
+      "line_or_area": "milestone_90_report()",
+      "required_fix": "Đổi 'ai_review=6.0' thành 'claude_review=6.0' trong milestone_90_report()."
+    },
+    {
+      "issue": "agent10/state.json chứa entry preview video với privacyStatus='private' và thumbnail_file=null trong 'uploaded' dict - video này đã được upload nhưng không đạt chuẩn (private, không thumbnail). Không có cơ chế tự động phát hiện và xử lý các uploaded videos không đạt chuẩn này.",
+      "file": "agent10/state.json",
+      "line_or_area": "uploaded[preview entry]",
+      "required_fix": "Thêm post-upload validation job để kiểm tra và update privacy status; hoặc đánh dấu rõ ràng các entries không đạt chuẩn."
+    },
+    {
+      "issue": "agent18/agent18_runner.py gọi github_sync và webhook_sender trong try/except riêng biệt nhưng vẫn ghi agent18_latest.json sau mỗi bước - nếu cả hai đều lỗi, file JSON sẽ có cả 'github_sync_error' và 'n8n_webhook_error' nhưng exit code vẫn là 0 nếu Claude review passed. Operator có thể không nhận ra sync thất bại.",
       "file": "agent18/agent18_runner.py",
-      "line_or_area": "github_sync block",
-      "required_fix": "Log rõ ràng và có retry hoặc alert khi sync thất bại"
-    },
-    {
-      "issue": "agent2/research.py: search cache lưu toàn bộ kết quả search vào một file JSON duy nhất (agent2_v11_cache.json) không có giới hạn kích thước - sau nhiều tháng chạy file có thể đạt hàng trăm MB gây chậm I/O",
-      "file": "agent2/research.py",
-      "line_or_area": "_load_cache(), _save_cache()",
-      "required_fix": "Giới hạn số entry cache hoặc dùng SQLite cho cache"
-    },
-    {
-      "issue": "agent18/pipeline_core/database.py: migrate() dùng BEGIN IMMEDIATE nhưng executescript() tự động commit transaction hiện tại trước khi chạy - các ALTER TABLE và CREATE TABLE không nằm trong cùng một transaction, có thể để lại schema không nhất quán nếu bị ngắt giữa chừng",
-      "file": "agent18/pipeline_core/database.py",
-      "line_or_area": "migrate(), executescript()",
-      "required_fix": "Tách executescript thành các execute() riêng lẻ trong cùng transaction"
+      "line_or_area": "main()",
+      "required_fix": "Phân biệt exit code cho sync failures; hoặc aggregate tất cả errors và report rõ ràng."
     }
   ],
   "low_issues": [
     {
-      "issue": "agent1/gemini_scorer.py: model mặc định là 'gemini-3.5-flash' nhưng README_V3.txt đề cập 'gemini-3.1-flash-lite' - không nhất quán giữa tài liệu và code",
-      "file": "agent1/config.py",
-      "line_or_area": "GEMINI_MODEL default",
-      "required_fix": "Đồng bộ tên model giữa README và config"
+      "issue": "agent1/gemini_scorer.py không có retry logic - nếu Gemini API trả lỗi tạm thời, toàn bộ item bị skip. agent1_backup_backlog có retry 3 lần nhưng phiên bản production thì không.",
+      "file": "agent1/gemini_scorer.py",
+      "line_or_area": "score()",
+      "required_fix": "Thêm retry với exponential backoff cho Gemini API calls."
     },
     {
-      "issue": "agent10/state.json: có entry upload preview video với privacyStatus=private và thumbnail_file=null - đây là dữ liệu production thực tế lộ trong source code repository",
-      "file": "agent10/state.json",
+      "issue": "agent10/config.py và agent10_backup/config.py tồn tại song song với cùng tên file nhưng khác nội dung (backup thiếu ALLOW_PARTS, DRIVE_ENABLED, REQUIRE_PUBLIC, MAX_RETRIES, RETRY_BASE_SECONDS, UPLOAD_CHUNK_MB). Nếu Python path không được set đúng, có thể import nhầm config.",
+      "file": "agent10_backup/config.py",
       "line_or_area": "toàn bộ file",
-      "required_fix": "Không commit state file production vào repository"
+      "required_fix": "Xóa hoặc đổi tên backup directories để tránh import confusion; dùng __init__.py để kiểm soát imports."
     },
     {
-      "issue": "agent18/review_engine/claude.py: temperature=0 được hardcode - không thể cấu hình qua env var",
+      "issue": "agent18/review_engine/claude.py strip markdown code fences bằng text.strip('`') - cách này không đúng vì strip() xóa tất cả backtick ở đầu và cuối chuỗi, không chỉ xóa triple backtick. Nếu JSON content có backtick ở cuối sẽ bị xóa nhầm.",
       "file": "agent18/review_engine/claude.py",
-      "line_or_area": "client.messages.create(temperature=0)",
-      "required_fix": "Cho phép cấu hình qua ANTHROPIC_TEMPERATURE env var"
+      "line_or_area": "review(), text.strip('`')",
+      "required_fix": "Dùng regex để strip code fences: re.sub(r'^```(?:json)?\\s*|\\s*```$', '', text, flags=re.MULTILINE)."
     },
     {
-      "issue": "Không có test evidence trên VPS - toàn bộ hệ thống 18 agent không có automated test suite được chạy và ghi log, không thể xác minh tính đúng đắn của các thay đổi V3",
-      "file": "(toàn hệ thống)",
-      "line_or_area": "CI/CD",
-      "required_fix": "Thêm pytest với coverage tối thiểu cho database migrations, state machine transitions, và preflight validation"
+      "issue": "agent2/config.py parse BACKOFF_MINUTES từ env var nhưng không validate số lượng phần tử phải bằng MAX_RETRIES. Nếu BACKOFF_MINUTES có ít phần tử hơn MAX_RETRIES, code dùng min(retry_count-1, len-1) để fallback - hành vi này không được document rõ ràng.",
+      "file": "agent2/config.py",
+      "line_or_area": "BACKOFF_MINUTES parsing",
+      "required_fix": "Thêm validation: len(BACKOFF_MINUTES) >= MAX_RETRIES hoặc document rõ fallback behavior."
+    },
+    {
+      "issue": "Không có test evidence trên VPS. Toàn bộ hệ thống 18 agents chưa có automated test suite được chạy và verify trên môi trường production. Đây là rủi ro vận hành nghiêm trọng cho release.",
+      "file": "toàn hệ thống",
+      "line_or_area": "N/A",
+      "required_fix": "Implement và chạy ít nhất unit tests cho database migrations, contract validation, và preflight checks trước khi release."
     }
   ],
   "strengths": [
-    "agent10/state_store.py: save_json_atomic() dùng fsync + os.replace() đúng chuẩn, an toàn khi VPS mất điện",
-    "agent10/main.py: checkpoint youtube_done ngay sau upload thành công trước khi Drive - đúng thiết kế 2-phase",
-    "agent18/pipeline_core/database.py: schema migration có version tracking (PRAGMA user_version), foreign key check, và idempotent CREATE IF NOT EXISTS",
-    "agent2/database.py: repair_orphan_verified() phát hiện và sửa case VERIFIED thiếu nguồn - logic phòng thủ tốt",
-    "agent18/pipeline_core/states.py: state machine đầy đủ với ALLOWED transitions, terminal states rõ ràng",
-    "agent18/review_engine/bundle.py: redact secrets trước khi gửi Claude - bảo mật tốt",
-    "agent10/main.py: fcntl.flock() ngăn chạy song song, daily_count() giới hạn upload mỗi ngày",
-    "agent2/database.py: mark_verified_guarded() kiểm tra lại nguồn trong DB trước khi VERIFIED - guard pattern đúng",
-    "agent18/pipeline_core/errors.py: phân loại lỗi retryable/non-retryable với backoff schedule rõ ràng",
-    "agent1/filtering.py: rapidfuzz token_set_ratio chống trùng lặp tiêu đề hiệu quả"
+    "Agent 10 TURBO implement atomic JSON writes với fsync đúng cách (state_store.py), đảm bảo an toàn khi VPS crash",
+    "Checkpoint pattern trong agent10/main.py: lưu youtube_done ngay sau upload thành công, trước khi archive Drive - đúng với yêu cầu 'không upload YouTube lần hai nếu Drive lỗi'",
+    "agent18/pipeline_core/database.py có schema migration idempotent với PRAGMA user_version, foreign key checks, và WAL mode đầy đủ",
+    "agent18/pipeline_core/security.py có secret scanning với redaction trước khi gửi cho Claude - bảo vệ credentials tốt",
+    "agent2/database.py implement repair_orphan_verified() để tự động phát hiện và sửa inconsistent state - defensive programming tốt",
+    "fcntl.flock trong agent10/main.py ngăn chạy đồng thời hiệu quả trên Linux/Ubuntu",
+    "agent18/review_engine/schema.py validate đầy đủ required keys, decision values, score range và list types trước khi accept Claude response",
+    "agent2/database.py dùng ON CONFLICT DO UPDATE với logic merge thông minh cho case_sources - giữ data tốt nhất từ nhiều lần upsert",
+    "agent18/pipeline_core/contracts.py định nghĩa rõ ràng input/output contracts cho tất cả 10 agents với schema versioning",
+    "agent10/preflight.py kiểm tra thumbnail 1280x720, tỷ lệ 16:9, dưới 2MB với double-open pattern (verify rồi mới đọc size) đúng cách"
   ],
   "tests_reviewed": [
-    "Không có test evidence trên VPS - đây là hạn chế nghiêm trọng",
-    "agent18/pipeline_core/adapters.py: DeterministicAdapter có thể dùng cho unit test nhưng không có test file nào được cung cấp",
-    "Không có pytest, unittest hoặc bất kỳ test runner nào được tìm thấy trong codebase"
+    "Không có test evidence riêng trên VPS - đây là hạn chế nghiêm trọng được ghi nhận",
+    "agent10/state.json: evidence thực tế cho thấy upload thành công video 0013-full.mp4 (video_id=a4K9eskuqMo, public, playlist OK, Drive archived)",
+    "agent10/daily_state.json: uploaded_today=1 nhất quán với state.json",
+    "agent18/pipeline_core/adapters.py: DeterministicAdapter có thể dùng cho integration testing nhưng chưa có test runner",
+    "Không có pytest/unittest files được cung cấp trong candidate bundle",
+    "Không có CI/CD pipeline configuration (GitHub Actions, etc.)"
   ]
 }
