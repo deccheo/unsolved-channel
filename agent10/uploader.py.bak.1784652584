@@ -1,0 +1,151 @@
+import json
+import logging
+import mimetypes
+import re
+from pathlib import Path
+from typing import Any
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+
+from config import (
+    CLIENT_SECRET_FILE,
+    DEFAULT_PRIVACY,
+    SCOPES,
+    THUMBNAILS_DIR,
+    TOKEN_FILE,
+)
+
+log = logging.getLogger("agent10")
+
+
+def load_credentials() -> Credentials:
+    if not TOKEN_FILE.exists():
+        raise RuntimeError(
+            f"Chưa có token YouTube. Chạy: "
+            f"/opt/unsolved-channel/agent1/venv/bin/python "
+            f"/opt/unsolved-channel/agent10/auth_youtube.py"
+        )
+
+    credentials = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+
+    if credentials.expired and credentials.refresh_token:
+        credentials.refresh(Request())
+        TOKEN_FILE.write_text(credentials.to_json(), encoding="utf-8")
+        TOKEN_FILE.chmod(0o600)
+
+    if not credentials.valid:
+        raise RuntimeError("Token YouTube không hợp lệ. Hãy xác thực lại.")
+
+    return credentials
+
+
+def youtube_client():
+    return build("youtube", "v3", credentials=load_credentials(), cache_discovery=False)
+
+
+def normalize_tags(tags: Any) -> list[str]:
+    if isinstance(tags, str):
+        tags = [part.strip() for part in tags.split(",")]
+    if not isinstance(tags, list):
+        return []
+    result = []
+    total = 0
+    for item in tags:
+        tag = re.sub(r"\s+", " ", str(item)).strip()
+        if not tag:
+            continue
+        if total + len(tag) > 450:
+            break
+        result.append(tag)
+        total += len(tag)
+    return result[:30]
+
+
+def find_thumbnail(slug: str) -> Path | None:
+    direct_names = [
+        f"{slug}.jpg",
+        f"{slug}.jpeg",
+        f"{slug}.png",
+        f"{slug}-thumbnail.jpg",
+        f"{slug}-thumbnail.jpeg",
+        f"{slug}-thumbnail.png",
+    ]
+    for name in direct_names:
+        path = THUMBNAILS_DIR / name
+        if path.exists():
+            return path
+
+    candidates = sorted(THUMBNAILS_DIR.glob(f"{slug}*"))
+    for path in candidates:
+        if path.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+            return path
+    return None
+
+
+def upload_video(video_path: Path, metadata: dict[str, Any]) -> dict[str, Any]:
+    youtube = youtube_client()
+
+    title = str(metadata.get("title") or video_path.stem)[:100]
+    description = str(metadata.get("description") or "")[:5000]
+    tags = normalize_tags(metadata.get("tags"))
+    category_id = str(metadata.get("categoryId") or metadata.get("category") or "24")
+    privacy = str(metadata.get("privacyStatus") or DEFAULT_PRIVACY)
+    language = str(metadata.get("defaultLanguage") or "en")
+    made_for_kids = bool(metadata.get("madeForKids", False))
+
+    body = {
+        "snippet": {
+            "title": title,
+            "description": description,
+            "tags": tags,
+            "categoryId": category_id,
+            "defaultLanguage": language,
+        },
+        "status": {
+            "privacyStatus": privacy,
+            "selfDeclaredMadeForKids": made_for_kids,
+        },
+    }
+
+    media = MediaFileUpload(
+        str(video_path),
+        mimetype=mimetypes.guess_type(video_path.name)[0] or "video/mp4",
+        resumable=True,
+        chunksize=8 * 1024 * 1024,
+    )
+
+    request = youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=media,
+    )
+
+    response = None
+    while response is None:
+        status, response = request.next_chunk()
+        if status:
+            log.info("Upload %.1f%%", status.progress() * 100)
+
+    video_id = response["id"]
+    thumbnail_path = find_thumbnail(video_path.stem)
+
+    if thumbnail_path:
+        youtube.thumbnails().set(
+            videoId=video_id,
+            media_body=MediaFileUpload(str(thumbnail_path)),
+        ).execute()
+        log.info("Đã đặt thumbnail: %s", thumbnail_path)
+    else:
+        log.warning("Không tìm thấy thumbnail cho %s", video_path.stem)
+
+    return {
+        "video_id": video_id,
+        "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
+        "title": title,
+        "privacyStatus": privacy,
+        "video_file": str(video_path),
+        "thumbnail_file": str(thumbnail_path) if thumbnail_path else None,
+    }

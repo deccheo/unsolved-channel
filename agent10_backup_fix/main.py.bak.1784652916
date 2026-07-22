@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+import json
+import logging
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from config import (
+    LOG_FILE,
+    MAX_UPLOADS_PER_RUN,
+    METADATA_DIR,
+    STATE_FILE,
+    UPLOADED_DIR,
+    VIDEOS_DIR,
+)
+from uploader import upload_video
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE, encoding="utf-8"), logging.StreamHandler()],
+)
+log = logging.getLogger("agent10")
+
+
+def load_state() -> dict:
+    if not STATE_FILE.exists():
+        return {"uploaded": {}}
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"uploaded": {}}
+
+
+def save_state(state: dict) -> None:
+    STATE_FILE.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def find_metadata(video: Path) -> Path | None:
+    candidates = [
+        METADATA_DIR / f"{video.stem}.json",
+        METADATA_DIR / f"{video.stem.replace('-preview', '')}.json",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+
+    prefix = video.stem.split("-preview")[0]
+    matches = sorted(METADATA_DIR.glob(f"{prefix}*.json"))
+    return matches[0] if matches else None
+
+
+def discover_jobs() -> list[tuple[Path, Path]]:
+    jobs = []
+    if not VIDEOS_DIR.exists():
+        return jobs
+
+    for video in sorted(VIDEOS_DIR.glob("*.mp4")):
+        metadata = find_metadata(video)
+        if metadata:
+            jobs.append((video, metadata))
+        else:
+            log.warning("Thiếu metadata cho video: %s", video)
+    return jobs
+
+
+def main() -> int:
+    log.info("Agent 10 bắt đầu")
+    state = load_state()
+    uploaded = state.setdefault("uploaded", {})
+    count = 0
+
+    jobs = discover_jobs()
+    if not jobs:
+        log.warning("Không có bộ video + metadata sẵn sàng để upload.")
+        return 0
+
+    for video_path, metadata_path in jobs:
+        key = str(video_path.resolve())
+        if key in uploaded:
+            continue
+
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            log.info("Đang upload: %s", video_path)
+            result = upload_video(video_path, metadata)
+            result["metadata_file"] = str(metadata_path)
+            result["uploaded_at"] = datetime.now(timezone.utc).isoformat()
+
+            uploaded[key] = result
+            save_state(state)
+
+            receipt = UPLOADED_DIR / f"{video_path.stem}.json"
+            receipt.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            log.info("Upload thành công: %s", result["youtube_url"])
+            count += 1
+        except Exception:
+            log.exception("Upload thất bại: %s", video_path)
+
+        if count >= MAX_UPLOADS_PER_RUN:
+            break
+
+    log.info("Agent 10 hoàn thành, đã upload %s video", count)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

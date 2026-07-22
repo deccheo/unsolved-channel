@@ -1,0 +1,123 @@
+import sqlite3
+from config import DB_PATH
+
+def connect():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    return conn
+
+def migrate():
+    with connect() as conn:
+        case_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cases)").fetchall()}
+        case_additions = {
+            "image_status": "TEXT DEFAULT 'PENDING'",
+            "image_count": "INTEGER DEFAULT 0",
+            "image_created_at": "TEXT",
+        }
+        for name, definition in case_additions.items():
+            if name not in case_cols:
+                conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {definition}")
+
+        scene_cols = {r["name"] for r in conn.execute("PRAGMA table_info(scenes)").fetchall()}
+        scene_additions = {
+            "image_path": "TEXT",
+            "image_status": "TEXT DEFAULT 'PENDING'",
+            "image_error": "TEXT",
+            "image_attempts": "INTEGER DEFAULT 0",
+        }
+        for name, definition in scene_additions.items():
+            if name not in scene_cols:
+                conn.execute(f"ALTER TABLE scenes ADD COLUMN {name} {definition}")
+
+def pending_cases(limit: int):
+    with connect() as conn:
+        return conn.execute("""
+            SELECT * FROM cases
+            WHERE production_status='SCENED'
+              AND COALESCE(image_status,'PENDING') IN ('PENDING','PARTIAL','RETRY')
+            ORDER BY verification_score DESC, overall_score DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+
+def pending_scenes(case_id: int, limit: int):
+    with connect() as conn:
+        return conn.execute("""
+            SELECT * FROM scenes
+            WHERE case_id=?
+              AND COALESCE(image_status,'PENDING') IN ('PENDING','RETRY')
+            ORDER BY scene_no ASC
+            LIMIT ?
+        """, (case_id, limit)).fetchall()
+
+def find_cached_image(visual_prompt: str, exclude_scene_id: int):
+    """Tìm ảnh READY có prompt giống hệt để tái sử dụng."""
+    prompt = (visual_prompt or "").strip()
+
+    if not prompt:
+        return None
+
+    with connect() as conn:
+        return conn.execute("""
+            SELECT id, image_path
+            FROM scenes
+            WHERE id <> ?
+              AND TRIM(COALESCE(visual_prompt, '')) = ?
+              AND image_status = 'READY'
+              AND COALESCE(image_path, '') <> ''
+            ORDER BY id DESC
+            LIMIT 1
+        """, (exclude_scene_id, prompt)).fetchone()
+
+
+def mark_scene_ready(scene_id: int, path: str):
+    with connect() as conn:
+        conn.execute("""
+            UPDATE scenes SET
+                image_path=?,
+                image_status='READY',
+                image_error=NULL,
+                image_attempts=COALESCE(image_attempts,0)+1
+            WHERE id=?
+        """, (path, scene_id))
+
+def mark_scene_retry(scene_id: int, error: str):
+    with connect() as conn:
+        conn.execute("""
+            UPDATE scenes SET
+                image_status='RETRY',
+                image_error=?,
+                image_attempts=COALESCE(image_attempts,0)+1
+            WHERE id=?
+        """, (error[:1200], scene_id))
+
+def finalize_case(case_id: int):
+    with connect() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM scenes WHERE case_id=?",
+            (case_id,)
+        ).fetchone()[0]
+
+        ready = conn.execute(
+            "SELECT COUNT(*) FROM scenes WHERE case_id=? AND image_status='READY'",
+            (case_id,)
+        ).fetchone()[0]
+
+        if total > 0 and ready == total:
+            image_status = "READY"
+            production_status = "IMAGED"
+        elif ready > 0:
+            image_status = "PARTIAL"
+            production_status = "SCENED"
+        else:
+            image_status = "RETRY"
+            production_status = "SCENED"
+
+        conn.execute("""
+            UPDATE cases SET
+                image_status=?,
+                image_count=?,
+                image_created_at=CURRENT_TIMESTAMP,
+                production_status=?
+            WHERE id=?
+        """, (image_status, ready, production_status, case_id))

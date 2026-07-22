@@ -1,0 +1,133 @@
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+from config import DESCRIPTION_DIR, METADATA_DIR, TAG_DIR, TITLE_DIR
+from gemini_client import generate_metadata
+
+
+def clean_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def normalize_hashtag(value: Any) -> str:
+    tag = clean_text(value).replace(" ", "")
+    if not tag:
+        return ""
+    return tag if tag.startswith("#") else f"#{tag}"
+
+
+def normalize(data: dict[str, Any], fallback_title: str) -> dict[str, Any]:
+    titles = data.get("title_options") or data.get("titles") or []
+    if isinstance(titles, str):
+        titles = [titles]
+    titles = [clean_text(x)[:100] for x in titles if clean_text(x)]
+
+    selected = clean_text(data.get("title") or (titles[0] if titles else fallback_title))[:100]
+    if not selected:
+        selected = fallback_title[:100]
+
+    description = str(data.get("description") or "").strip()
+    tags = data.get("tags") or []
+    hashtags = data.get("hashtags") or []
+
+    if isinstance(tags, str):
+        tags = [x.strip() for x in tags.split(",")]
+    if isinstance(hashtags, str):
+        hashtags = [x.strip() for x in hashtags.replace(",", " ").split()]
+
+    tags = list(dict.fromkeys(clean_text(x) for x in tags if clean_text(x)))[:25]
+    hashtags = list(
+        dict.fromkeys(normalize_hashtag(x) for x in hashtags if normalize_hashtag(x))
+    )[:8]
+
+    return {
+        "title": selected,
+        "title_options": titles[:3] or [selected],
+        "description": description[:5000],
+        "tags": tags,
+        "hashtags": hashtags,
+        "categoryId": str(data.get("categoryId") or data.get("category") or "24"),
+        "defaultLanguage": clean_text(data.get("defaultLanguage") or "en"),
+        "privacyStatus": clean_text(data.get("privacyStatus") or "public"),
+        "madeForKids": bool(data.get("madeForKids", False)),
+        "primary_keyword": clean_text(data.get("primary_keyword")),
+    }
+
+
+def build_prompt(source: dict[str, Any], slug: str) -> str:
+    title = clean_text(
+        source.get("title")
+        or source.get("story_title")
+        or source.get("name")
+        or slug.replace("-", " ")
+    )
+    summary = clean_text(
+        source.get("summary")
+        or source.get("synopsis")
+        or source.get("description")
+        or source.get("story")
+        or source.get("script")
+        or ""
+    )
+    if len(summary) > 12000:
+        summary = summary[:12000]
+
+    return f"""
+You are Agent 9 for an English-language YouTube mystery storytelling channel.
+
+Create compelling but truthful YouTube SEO metadata for this story.
+Do not claim that a fictional story is a real case.
+Avoid graphic, sensational, misleading, or defamatory claims.
+The title must be no more than 100 characters.
+The description should be natural English, approximately 900-1800 characters.
+Return JSON only.
+
+STORY ID: {slug}
+WORKING TITLE: {title}
+STORY CONTENT OR SUMMARY:
+{summary}
+
+Required JSON structure:
+{{
+  "title": "best final title",
+  "title_options": ["option 1", "option 2", "option 3"],
+  "description": "complete YouTube description including a brief CTA",
+  "tags": ["15 to 25 relevant tags"],
+  "hashtags": ["5 to 8 hashtags"],
+  "primary_keyword": "main search phrase",
+  "categoryId": "24",
+  "defaultLanguage": "en",
+  "privacyStatus": "public",
+  "madeForKids": false
+}}
+""".strip()
+
+
+def save_metadata(slug: str, metadata: dict[str, Any]) -> Path:
+    metadata_path = METADATA_DIR / f"{slug}.json"
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (TITLE_DIR / f"{slug}.txt").write_text(
+        "\n".join(metadata["title_options"]), encoding="utf-8"
+    )
+    (DESCRIPTION_DIR / f"{slug}.txt").write_text(
+        metadata["description"], encoding="utf-8"
+    )
+    (TAG_DIR / f"{slug}.txt").write_text(
+        ", ".join(metadata["tags"]) + "\n" + " ".join(metadata["hashtags"]),
+        encoding="utf-8",
+    )
+    return metadata_path
+
+
+def generate_for_source(source_path: Path, slug: str) -> Path:
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    fallback_title = clean_text(source.get("title") or slug.replace("-", " "))
+    raw = generate_metadata(build_prompt(source, slug))
+    metadata = normalize(raw, fallback_title)
+    metadata["source_file"] = str(source_path)
+    metadata["story_id"] = slug
+    return save_metadata(slug, metadata)

@@ -1,0 +1,6 @@
+google-genai
+feedparser
+requests
+python-dotenv
+rapidfuzz
+pydantic

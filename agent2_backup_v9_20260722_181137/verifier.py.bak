@@ -1,0 +1,105 @@
+import json
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
+from config import GEMINI_API_KEY, GEMINI_MODEL
+
+class Verification(BaseModel):
+    real_case: bool
+    unresolved: bool
+    enough_sources: bool
+    source_count_used: int
+    verification_score: int = Field(ge=0, le=100)
+    verified_summary: str
+    confirmed_facts: list[str]
+    unsupported_claims: list[str]
+    conflicts: list[str]
+    legal_risk: str
+    recommendation: str
+
+def verify(case, sources) -> dict:
+    client = genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options={"timeout": 60000},
+    )
+
+    source_text = []
+    for i, s in enumerate(sources[:4], 1):
+        source_text.append(
+            f"""SOURCE {i}
+TITLE: {s['title']}
+PUBLISHER: {s['source_name']}
+URL: {s['url']}
+RELIABILITY SCORE: {s['reliability_score']}
+TEXT:
+{s['extracted_text'][:3500]}
+"""
+        )
+
+    prompt = f"""
+You are a strict but practical fact-checking editor for an
+English-language documentary channel about unresolved cases.
+
+CASE LEAD:
+Name: {case['case_name'] or case['title']}
+Country: {case['country']}
+Initial summary: {case['ai_summary'] or case['article_summary']}
+
+SOURCES:
+{chr(10).join(source_text)}
+
+Rules:
+1. Use only the supplied sources.
+2. Mark real_case=true when the sources clearly concern a real person
+   or real criminal investigation.
+3. Mark unresolved=true when the latest supplied sources indicate that
+   the disappearance, identity, homicide, or core question remains open.
+4. enough_sources=true requires either:
+   - one official source plus one independent source, or
+   - at least two independent news sources that materially support the case.
+5. Do not require every detail to be confirmed before recommending a documentary.
+6. Put uncertain details in unsupported_claims instead of rejecting the entire case.
+7. Put material disagreements in conflicts.
+8. Never accuse an uncharged person.
+9. legal_risk must be exactly LOW, MEDIUM, or HIGH.
+10. recommendation must be exactly VERIFIED, NEEDS_REVIEW, or REJECTED.
+
+Scoring:
+- 80-100: strong official or multi-source verification.
+- 60-79: well-supported case with some minor gaps.
+- 40-59: genuine unresolved case with enough core facts for a careful documentary.
+- 20-39: too many gaps or weak source coverage.
+- 0-19: likely unsuitable, solved, fictional, or unsupported.
+
+Use VERIFIED when:
+- real_case=true,
+- unresolved=true,
+- enough_sources=true,
+- legal_risk is LOW or MEDIUM,
+- and the core timeline is sufficiently supported.
+
+Use NEEDS_REVIEW only when a human must resolve a material conflict,
+unclear case status, or notable legal risk.
+Use REJECTED for solved, fictional, duplicate, exploitative, or unsupported topics.
+"""
+
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+            response_schema=Verification,
+            max_output_tokens=1200,
+        ),
+    )
+
+    result = json.loads(response.text)
+    result["recommendation"] = str(
+        result.get("recommendation", "NEEDS_REVIEW")
+    ).strip().upper()
+    result["legal_risk"] = str(
+        result.get("legal_risk", "MEDIUM")
+    ).strip().upper()
+
+    return result
